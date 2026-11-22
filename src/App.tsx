@@ -11,6 +11,7 @@ import {
   syncStateToCloud, 
   subscribeToCloudState, 
   fetchStateFromCloud, 
+  flushPendingCloudSync,
   getEmergencyLocalBackup, 
   saveEmergencyLocalBackup,
   isDummyQuestionList,
@@ -81,6 +82,7 @@ export default function App() {
   // Cloud sync status state
   const [cloudSynced, setCloudSynced] = useState<boolean>(false);
   const [isCloudLoading, setIsCloudLoading] = useState<boolean>(true);
+  const [cloudSyncError, setCloudSyncError] = useState<string | null>(null);
 
   // Sync state with localStorage safely
   useEffect(() => {
@@ -96,49 +98,51 @@ export default function App() {
   useEffect(() => {
     let isMounted = true;
 
-    // 1. Initial snapshot / fetch - NEVER overwrite cloud on startup with default data!
-    fetchStateFromCloud().then((cloudData) => {
-      if (!isMounted) return;
-      if (cloudData) {
-        setAppState(prev => {
-          // If cloud has real questions, use them; if cloud has dummy but local has real, keep local!
-          const finalQuestions = (cloudData.questions && !isDummyQuestionList(cloudData.questions))
-            ? cloudData.questions
-            : (prev.questions && !isDummyQuestionList(prev.questions) 
-                ? prev.questions 
-                : (cloudData.questions || prev.questions));
+    // 1. Flush any pending unsynced local changes, then fetch fresh state from Cloud Server
+    (async () => {
+      try {
+        await flushPendingCloudSync();
+        const cloudData = await fetchStateFromCloud();
+        if (!isMounted) return;
+        if (cloudData) {
+          setAppState(prev => {
+            const finalQuestions = (cloudData.questions && !isDummyQuestionList(cloudData.questions))
+              ? cloudData.questions
+              : (prev.questions && !isDummyQuestionList(prev.questions)
+                  ? prev.questions
+                  : (cloudData.questions || prev.questions));
 
-          const finalParticipants = (cloudData.participants && !isDummyParticipantList(cloudData.participants))
-            ? cloudData.participants
-            : (prev.participants && !isDummyParticipantList(prev.participants)
-                ? prev.participants
-                : (cloudData.participants || prev.participants));
+            const finalParticipants = (cloudData.participants && !isDummyParticipantList(cloudData.participants))
+              ? cloudData.participants
+              : (prev.participants && !isDummyParticipantList(prev.participants)
+                  ? prev.participants
+                  : (cloudData.participants || prev.participants));
 
-          const next = {
-            ...prev,
-            ...cloudData,
-            questions: finalQuestions,
-            participants: finalParticipants,
-            adminConfig: cloudData.adminConfig || prev.adminConfig
-          };
-          saveEmergencyLocalBackup(next);
-          return next;
-        });
-        setCloudSynced(true);
-      } else {
-        const backup = getEmergencyLocalBackup();
-        if (backup && (backup.participants || backup.questions)) {
-          setAppState(prev => ({
-            ...prev,
-            ...backup,
-            questions: (backup.questions && !isDummyQuestionList(backup.questions)) ? backup.questions : prev.questions,
-            participants: (backup.participants && !isDummyParticipantList(backup.participants)) ? backup.participants : prev.participants
-          }));
+            const next = {
+              ...prev,
+              ...cloudData,
+              questions: finalQuestions,
+              participants: finalParticipants,
+              adminConfig: cloudData.adminConfig || prev.adminConfig
+            };
+            saveEmergencyLocalBackup(next);
+            return next;
+          });
+          setCloudSynced(true);
+          setCloudSyncError(null);
+        } else {
+          const backup = getEmergencyLocalBackup();
+          if (backup && (backup.participants || backup.questions)) {
+            setAppState(prev => ({
+              ...prev,
+              ...backup,
+              questions: (backup.questions && !isDummyQuestionList(backup.questions)) ? backup.questions : prev.questions,
+              participants: (backup.participants && !isDummyParticipantList(backup.participants)) ? backup.participants : prev.participants
+            }));
+          }
         }
-      }
-      setIsCloudLoading(false);
-    }).catch(() => {
-      if (isMounted) {
+      } catch {
+        if (!isMounted) return;
         const backup = getEmergencyLocalBackup();
         if (backup) {
           setAppState(prev => ({
@@ -148,9 +152,10 @@ export default function App() {
             participants: (backup.participants && !isDummyParticipantList(backup.participants)) ? backup.participants : prev.participants
           }));
         }
-        setIsCloudLoading(false);
+      } finally {
+        if (isMounted) setIsCloudLoading(false);
       }
-    });
+    })();
 
     // 2. Real-time multi-device sync listener
     const unsubscribe = subscribeToCloudState((incomingState) => {
@@ -192,11 +197,30 @@ export default function App() {
 
   const handleUpdateState = (newState: CBTAppState, changedSlice?: Partial<CBTAppState>, options?: any) => {
     setAppState(newState);
-    // Push immediately to Firebase Cloud for cross-device updates
-    if (changedSlice) {
-      syncStateToCloud(changedSlice, options);
-    } else {
-      syncStateToCloud(newState, options);
+    // Push immediately to Firebase Cloud for cross-device updates and surface any failure
+    const sliceToSync = changedSlice || newState;
+    syncStateToCloud(sliceToSync, options).then((ok) => {
+      if (ok) {
+        setCloudSynced(true);
+        setCloudSyncError(null);
+      } else {
+        setCloudSyncError('Perubahan tersimpan di browser ini, namun gagal tersinkron ke Database Cloud. Periksa koneksi atau ukuran gambar lalu klik Coba Sinkron Ulang.');
+      }
+    });
+  };
+
+  const handleRetryCloudSync = async () => {
+    setIsCloudLoading(true);
+    try {
+      const ok = await flushPendingCloudSync();
+      if (ok) {
+        setCloudSyncError(null);
+        await handleManualRefreshCloud();
+      } else {
+        setCloudSyncError('Sinkronisasi ke Database Cloud masih gagal. Pastikan koneksi internet stabil dan ukuran total gambar soal tidak melebihi batas dokumen Cloud.');
+      }
+    } finally {
+      setIsCloudLoading(false);
     }
   };
 
@@ -204,14 +228,34 @@ export default function App() {
   const handleManualRefreshCloud = async () => {
     setIsCloudLoading(true);
     try {
+      await flushPendingCloudSync();
       const data = await fetchStateFromCloud();
       if (data) {
-        setAppState(prev => ({
-          ...prev,
-          ...data,
-          adminConfig: data.adminConfig || prev.adminConfig
-        }));
+        setAppState(prev => {
+          const finalQuestions = (data.questions && !isDummyQuestionList(data.questions))
+            ? data.questions
+            : (prev.questions && !isDummyQuestionList(prev.questions)
+                ? prev.questions
+                : (data.questions || prev.questions));
+
+          const finalParticipants = (data.participants && !isDummyParticipantList(data.participants))
+            ? data.participants
+            : (prev.participants && !isDummyParticipantList(prev.participants)
+                ? prev.participants
+                : (data.participants || prev.participants));
+
+          const next = {
+            ...prev,
+            ...data,
+            questions: finalQuestions,
+            participants: finalParticipants,
+            adminConfig: data.adminConfig || prev.adminConfig
+          };
+          saveEmergencyLocalBackup(next);
+          return next;
+        });
         setCloudSynced(true);
+        setCloudSyncError(null);
       }
     } catch (e) {
       console.warn('Gagal memuat ulang data cloud:', e);
@@ -915,6 +959,8 @@ export default function App() {
           activeSubMenu={activeSubMenu}
           onChangeMenu={changeAdminMenu}
           userRole={role}
+          cloudSyncError={cloudSyncError}
+          onRetryCloudSync={handleRetryCloudSync}
         />
       )}
 

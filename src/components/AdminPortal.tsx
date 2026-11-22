@@ -19,12 +19,6 @@ import ReportsModule from './ReportsModule';
 import ToolsModule from './ToolsModule';
 import TeachersModule from './TeachersModule';
 import AdminProfileModule from './AdminProfileModule';
-import { 
-  deleteQuestionFromCloud, 
-  deleteQuestionsBulkFromCloud, 
-  deleteParticipantFromCloud, 
-  deleteParticipantsBulkFromCloud 
-} from '../firebase';
 
 interface AdminPortalProps {
   appState: CBTAppState;
@@ -34,6 +28,8 @@ interface AdminPortalProps {
   activeSubMenu: string;
   onChangeMenu: (menu: string, submenu: string) => void;
   userRole?: 'admin' | 'guru';
+  cloudSyncError?: string | null;
+  onRetryCloudSync?: () => void;
 }
 
 export default function AdminPortal({
@@ -43,7 +39,9 @@ export default function AdminPortal({
   activeMenu,
   activeSubMenu,
   onChangeMenu,
-  userRole = 'admin'
+  userRole = 'admin',
+  cloudSyncError,
+  onRetryCloudSync
 }: AdminPortalProps) {
   const [sidebarOpen, setSidebarOpen] = React.useState(true);
 
@@ -115,14 +113,12 @@ export default function AdminPortal({
     });
   };
   const deleteParticipant = (id: string) => {
-    deleteParticipantFromCloud(id);
     saveState({ 
       participants: participants.filter(p => p.id !== id),
       testAttempts: testAttempts.filter(a => a.participantId !== id)
     }, { allowParticipantDeletion: true });
   };
   const deleteParticipantsBulk = (ids: string[]) => {
-    deleteParticipantsBulkFromCloud(ids);
     saveState({ 
       participants: participants.filter(p => !ids.includes(p.id)),
       testAttempts: testAttempts.filter(a => !ids.includes(a.participantId))
@@ -199,7 +195,6 @@ export default function AdminPortal({
     });
   };
   const deleteQuestion = (id: string) => {
-    deleteQuestionFromCloud(id);
     saveState({ questions: questions.filter(q => q.id !== id) }, { allowQuestionDeletion: true });
   };
   const bulkImportQuestions = (qs: Question[]) => {
@@ -777,6 +772,23 @@ export default function AdminPortal({
 
         {/* Dynamic Panel Content area */}
         <main className="p-6 flex-1 bg-emerald-50/40">
+          {cloudSyncError && (
+            <div className="mb-4 p-3.5 bg-red-50 border border-red-200 rounded-xl flex flex-wrap items-center justify-between gap-3 text-xs text-red-800 shadow-xs">
+              <div className="flex items-center gap-2 font-semibold">
+                <ShieldAlert className="h-4 w-4 text-red-600 shrink-0" />
+                <span>{cloudSyncError}</span>
+              </div>
+              {onRetryCloudSync && (
+                <button
+                  type="button"
+                  onClick={onRetryCloudSync}
+                  className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg transition-all cursor-pointer shrink-0"
+                >
+                  Coba Sinkron Ulang
+                </button>
+              )}
+            </div>
+          )}
           {activeMenu === 'overview' && renderDashboardOverview()}
 
           {activeMenu === 'data_modul' && (

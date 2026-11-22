@@ -140,6 +140,7 @@ export function isDummyQuestionList(list?: any[]): boolean {
  * Emergency local backup keeper - ensures questions and participants are NEVER lost
  */
 export function saveEmergencyLocalBackup(data: Partial<CBTAppState>) {
+  if (typeof localStorage === 'undefined') return;
   try {
     if (data.participants && data.participants.length > 0 && !isDummyParticipantList(data.participants)) {
       localStorage.setItem('cbt_backup_students', JSON.stringify(data.participants));
@@ -167,6 +168,7 @@ export function saveEmergencyLocalBackup(data: Partial<CBTAppState>) {
  * Retrieve emergency backup from localStorage if cloud is ever offline
  */
 export function getEmergencyLocalBackup(): Partial<CBTAppState> | null {
+  if (typeof localStorage === 'undefined') return null;
   try {
     const rawStudents = localStorage.getItem('cbt_backup_students');
     const rawQuestions = localStorage.getItem('cbt_backup_questions');
@@ -195,6 +197,61 @@ export interface SyncCloudOptions {
   isProctorUpdate?: boolean;
 }
 
+const PENDING_SYNC_KEY = 'cbt_pending_cloud_sync';
+
+function savePendingCloudSlice(slice: Partial<CBTAppState>, options?: SyncCloudOptions) {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const existingRaw = localStorage.getItem(PENDING_SYNC_KEY);
+    const existing = existingRaw ? JSON.parse(existingRaw) : {};
+    const mergedSlice = { ...(existing.slice || {}), ...slice };
+    const mergedOptions = { ...(existing.options || {}), ...(options || {}) };
+    localStorage.setItem(PENDING_SYNC_KEY, JSON.stringify({
+      slice: mergedSlice,
+      options: mergedOptions,
+      ts: new Date().toISOString()
+    }));
+  } catch (e) {
+    console.warn('Gagal mencatat antrean sinkronisasi lokal:', e);
+  }
+}
+
+export function clearPendingCloudSlice() {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.removeItem(PENDING_SYNC_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+export function getPendingCloudSlice(): { slice: Partial<CBTAppState>; options?: SyncCloudOptions; ts?: string } | null {
+  if (typeof localStorage === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(PENDING_SYNC_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.slice && Object.keys(parsed.slice).length > 0) {
+      return parsed;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+/**
+ * Fetch the freshest document from Firestore Server (with cache fallback only if offline)
+ */
+async function getDocPreferServer(docRef: ReturnType<typeof doc>) {
+  try {
+    return await getDocFromServer(docRef);
+  } catch (serverErr) {
+    console.warn('[CBT Cloud] getDocFromServer fallback ke cache lokal:', serverErr);
+    return await getDoc(docRef);
+  }
+}
+
 /**
  * Save complete or partial state to Firestore for cross-device synchronization.
  * Includes IRON-CLAD ANTI-WIPE SHIELD so newly opened phones/laptops or student logins
@@ -211,10 +268,12 @@ export async function syncStateToCloud(
     // Save to emergency local backup first
     saveEmergencyLocalBackup(state);
 
-    // Fetch existing document to guard against inadvertent wipes
+    // Fetch existing document from server to guard against inadvertent wipes
     let existingData: any = null;
+    let existingFetchSucceeded = false;
     try {
-      const existingSnap = await getDoc(docRef);
+      const existingSnap = await getDocPreferServer(docRef);
+      existingFetchSucceeded = true;
       if (existingSnap.exists()) {
         existingData = existingSnap.data();
       }
@@ -222,12 +281,19 @@ export async function syncStateToCloud(
       console.warn('[CBT Cloud] Tidak dapat mengambil data eksisting saat validasi guard:', fetchErr);
     }
 
+    // If we could not verify the cloud document while writing questions or participants,
+    // queue locally and abort rather than risking overwriting cloud data blindly!
+    if (!existingFetchSucceeded && (state.questions !== undefined || state.participants !== undefined)) {
+      savePendingCloudSlice(state, options);
+      return false;
+    }
+
     const safeState: Partial<CBTAppState> = { ...state };
 
     // 1. ANTI-WIPE GUARD FOR PARTICIPANTS
     if (safeState.participants !== undefined) {
       if (isDummyParticipantList(safeState.participants)) {
-        if (existingData?.participants && !isDummyParticipantList(existingData.participants)) {
+        if (!existingData || (existingData?.participants && !isDummyParticipantList(existingData.participants))) {
           console.warn('[CBT Firestore Guard] Menolak penimpaan siswa riil dengan dummy data.');
           delete safeState.participants;
         }
@@ -242,8 +308,8 @@ export async function syncStateToCloud(
     // 2. IRON-CLAD ANTI-WIPE GUARD FOR QUESTIONS
     if (safeState.questions !== undefined) {
       if (isDummyQuestionList(safeState.questions)) {
-        // If incoming questions are dummy default questions, NEVER overwrite real cloud questions!
-        if (existingData?.questions && !isDummyQuestionList(existingData.questions) && existingData.questions.length > 0) {
+        // NEVER overwrite real cloud questions (or an unverified doc) with dummy seed!
+        if (!existingData || (existingData?.questions && !isDummyQuestionList(existingData.questions) && existingData.questions.length > 0)) {
           console.warn('[CBT Firestore Guard] Menolak penimpaan bank soal riil oleh soal dummy seed.');
           delete safeState.questions;
         }
@@ -254,28 +320,24 @@ export async function syncStateToCloud(
         }
       } else if (!options?.allowQuestionDeletion && existingData?.questions && Array.isArray(existingData.questions) && existingData.questions.length > 0) {
         // MERGE LOGIC: Prevent accidental dropping of questions!
-        // Combine existing non-dummy questions with incoming questions
         const existingQs = existingData.questions as Question[];
         const incomingQs = safeState.questions as Question[];
 
         const qMap = new Map<string, Question>();
-        // Add existing questions (filter out dummy if incoming has real questions)
         existingQs.forEach(q => {
           if (!isDummyQuestionList([q])) {
             qMap.set(q.id, q);
           }
         });
-        // Upsert / overlay incoming questions
         incomingQs.forEach(q => {
           qMap.set(q.id, q);
         });
 
-        // Ensure we don't accidentally lose any question
         safeState.questions = Array.from(qMap.values());
         saveEmergencyLocalBackup({ questions: safeState.questions });
       }
     }
-    
+
     // Clean undefined fields and prepare payload
     const rawPayload: Record<string, any> = {
       updatedAt: new Date().toISOString()
@@ -291,10 +353,17 @@ export async function syncStateToCloud(
     if (safeState.teachers !== undefined) rawPayload.teachers = safeState.teachers;
     if (safeState.currentToken !== undefined) rawPayload.currentToken = safeState.currentToken;
 
+    // Skip empty write if all guarded fields were stripped
+    if (Object.keys(rawPayload).length <= 1) {
+      return true;
+    }
+
     const payload = sanitizeForFirestore(rawPayload);
     await setDoc(docRef, payload, { merge: true });
+    clearPendingCloudSlice();
     return true;
   } catch (error) {
+    savePendingCloudSlice(state, options);
     handleFirestoreError(error, OperationType.WRITE, docPath);
     console.warn('Gagal sinkronisasi ke Firebase Cloud:', error);
     return false;
@@ -302,22 +371,33 @@ export async function syncStateToCloud(
 }
 
 /**
+ * Flush any locally queued state mutations that previously failed while offline
+ */
+export async function flushPendingCloudSync(): Promise<boolean> {
+  const pending = getPendingCloudSlice();
+  if (!pending) return true;
+  return syncStateToCloud(pending.slice, pending.options);
+}
+
+/**
  * Explicitly delete a single question from Cloud without triggering anti-wipe false positives
  */
 export async function deleteQuestionFromCloud(questionId: string): Promise<boolean> {
+  const docPath = `${CBT_COLLECTION}/${CBT_STATE_DOC}`;
   try {
     const docRef = doc(db, CBT_COLLECTION, CBT_STATE_DOC);
-    const snap = await getDoc(docRef);
+    const snap = await getDocPreferServer(docRef);
     if (snap.exists()) {
       const data = snap.data();
       const current = (data.questions || []) as Question[];
       const updated = current.filter(q => q.id !== questionId);
-      await setDoc(docRef, { questions: updated, updatedAt: new Date().toISOString() }, { merge: true });
+      await setDoc(docRef, sanitizeForFirestore({ questions: updated, updatedAt: new Date().toISOString() }), { merge: true });
       saveEmergencyLocalBackup({ questions: updated });
       return true;
     }
     return false;
   } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, docPath);
     console.warn('Gagal menghapus soal dari cloud:', err);
     return false;
   }
@@ -327,20 +407,22 @@ export async function deleteQuestionFromCloud(questionId: string): Promise<boole
  * Explicitly delete multiple questions from Cloud
  */
 export async function deleteQuestionsBulkFromCloud(questionIds: string[]): Promise<boolean> {
+  const docPath = `${CBT_COLLECTION}/${CBT_STATE_DOC}`;
   try {
     const docRef = doc(db, CBT_COLLECTION, CBT_STATE_DOC);
-    const snap = await getDoc(docRef);
+    const snap = await getDocPreferServer(docRef);
     if (snap.exists()) {
       const data = snap.data();
       const current = (data.questions || []) as Question[];
       const idSet = new Set(questionIds);
       const updated = current.filter(q => !idSet.has(q.id));
-      await setDoc(docRef, { questions: updated, updatedAt: new Date().toISOString() }, { merge: true });
+      await setDoc(docRef, sanitizeForFirestore({ questions: updated, updatedAt: new Date().toISOString() }), { merge: true });
       saveEmergencyLocalBackup({ questions: updated });
       return true;
     }
     return false;
   } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, docPath);
     console.warn('Gagal menghapus masal soal dari cloud:', err);
     return false;
   }
@@ -350,19 +432,21 @@ export async function deleteQuestionsBulkFromCloud(questionIds: string[]): Promi
  * Explicitly delete a single participant from Cloud
  */
 export async function deleteParticipantFromCloud(participantId: string): Promise<boolean> {
+  const docPath = `${CBT_COLLECTION}/${CBT_STATE_DOC}`;
   try {
     const docRef = doc(db, CBT_COLLECTION, CBT_STATE_DOC);
-    const snap = await getDoc(docRef);
+    const snap = await getDocPreferServer(docRef);
     if (snap.exists()) {
       const data = snap.data();
       const current = (data.participants || []) as Participant[];
       const updated = current.filter(p => p.id !== participantId);
-      await setDoc(docRef, { participants: updated, updatedAt: new Date().toISOString() }, { merge: true });
+      await setDoc(docRef, sanitizeForFirestore({ participants: updated, updatedAt: new Date().toISOString() }), { merge: true });
       saveEmergencyLocalBackup({ participants: updated });
       return true;
     }
     return false;
   } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, docPath);
     console.warn('Gagal menghapus siswa dari cloud:', err);
     return false;
   }
@@ -372,20 +456,22 @@ export async function deleteParticipantFromCloud(participantId: string): Promise
  * Explicitly delete multiple participants from Cloud
  */
 export async function deleteParticipantsBulkFromCloud(participantIds: string[]): Promise<boolean> {
+  const docPath = `${CBT_COLLECTION}/${CBT_STATE_DOC}`;
   try {
     const docRef = doc(db, CBT_COLLECTION, CBT_STATE_DOC);
-    const snap = await getDoc(docRef);
+    const snap = await getDocPreferServer(docRef);
     if (snap.exists()) {
       const data = snap.data();
       const current = (data.participants || []) as Participant[];
       const idSet = new Set(participantIds);
       const updated = current.filter(p => !idSet.has(p.id));
-      await setDoc(docRef, { participants: updated, updatedAt: new Date().toISOString() }, { merge: true });
+      await setDoc(docRef, sanitizeForFirestore({ participants: updated, updatedAt: new Date().toISOString() }), { merge: true });
       saveEmergencyLocalBackup({ participants: updated });
       return true;
     }
     return false;
   } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, docPath);
     console.warn('Gagal menghapus masal siswa dari cloud:', err);
     return false;
   }
@@ -395,31 +481,35 @@ export async function deleteParticipantsBulkFromCloud(participantIds: string[]):
  * Specifically save proctor adminConfig to Cloud for instant cross-device login
  */
 export async function syncAdminConfigToCloud(adminConfig: AdminConfig): Promise<boolean> {
+  const docPath = `${CBT_COLLECTION}/${CBT_STATE_DOC}`;
   try {
     const docRef = doc(db, CBT_COLLECTION, CBT_STATE_DOC);
-    await setDoc(docRef, { 
+    await setDoc(docRef, sanitizeForFirestore({
       adminConfig,
-      updatedAt: new Date().toISOString() 
-    }, { merge: true });
+      updatedAt: new Date().toISOString()
+    }), { merge: true });
     return true;
   } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, docPath);
     console.warn('Gagal sinkronisasi kredensial proktor ke cloud:', error);
     return false;
   }
 }
 
 /**
- * Fetch latest state from Cloud once on startup
+ * Fetch latest state directly from Cloud Server on startup & manual refresh
  */
 export async function fetchStateFromCloud(): Promise<Partial<CBTAppState> | null> {
+  const docPath = `${CBT_COLLECTION}/${CBT_STATE_DOC}`;
   try {
     const docRef = doc(db, CBT_COLLECTION, CBT_STATE_DOC);
-    const snap = await getDoc(docRef);
+    const snap = await getDocPreferServer(docRef);
     if (snap.exists()) {
       return snap.data() as Partial<CBTAppState>;
     }
     return null;
   } catch (error) {
+    handleFirestoreError(error, OperationType.GET, docPath);
     console.warn('Gagal memuat data dari cloud pada inisialisasi:', error);
     return null;
   }
@@ -431,6 +521,7 @@ export async function fetchStateFromCloud(): Promise<Partial<CBTAppState> | null
 export function subscribeToCloudState(
   onUpdate: (cloudState: Partial<CBTAppState>) => void
 ) {
+  const docPath = `${CBT_COLLECTION}/${CBT_STATE_DOC}`;
   try {
     const docRef = doc(db, CBT_COLLECTION, CBT_STATE_DOC);
     return onSnapshot(
@@ -442,6 +533,7 @@ export function subscribeToCloudState(
         }
       },
       (error) => {
+        handleFirestoreError(error, OperationType.GET, docPath);
         console.warn('Realtime listener error:', error);
       }
     );
