@@ -7,7 +7,7 @@ import React from 'react';
 import { 
   FolderLock, BookOpen, Users, ClipboardCheck, BarChart3, Wrench, 
   Menu, X, Laptop, LogOut, Award, CheckCircle, HelpCircle, UserCheck, ShieldAlert,
-  Settings
+  Settings, Link2, Copy, Check
 } from 'lucide-react';
 import { CBTAppState, Topic, Question, Group, Participant, Test, TestAttempt, FileManagerFile, Teacher, AdminConfig } from '../types';
 
@@ -44,6 +44,34 @@ export default function AdminPortal({
   onRetryCloudSync
 }: AdminPortalProps) {
   const [sidebarOpen, setSidebarOpen] = React.useState(true);
+  const [copiedLinkType, setCopiedLinkType] = React.useState<'vercel' | 'aistudio' | 'current' | null>(null);
+
+  const vercelStudentUrl = 'https://assesmendigital.vercel.app/?mode=siswa';
+  const aiStudioStudentUrl = 'https://sistem-ujian-online-cbt-1.ai.studio/?mode=siswa';
+  const isVercelHost = typeof window !== 'undefined' && window.location.hostname.includes('vercel.app');
+  const primaryStudentUrl = isVercelHost ? `${window.location.origin}/?mode=siswa` : vercelStudentUrl;
+  const currentOriginStudentUrl = typeof window !== 'undefined'
+    ? `${window.location.origin}/?mode=siswa`
+    : vercelStudentUrl;
+
+  const handleCopyStudentUrl = (type: 'vercel' | 'aistudio' | 'current', url: string) => {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url);
+      } else {
+        const temp = document.createElement('textarea');
+        temp.value = url;
+        document.body.appendChild(temp);
+        temp.select();
+        document.execCommand('copy');
+        document.body.removeChild(temp);
+      }
+      setCopiedLinkType(type);
+      setTimeout(() => setCopiedLinkType(null), 2500);
+    } catch (e) {
+      console.warn('Gagal menyalin link siswa:', e);
+    }
+  };
 
   const { topics, questions, groups, participants, tests, testAttempts, files, currentToken, teachers = [], adminConfig } = appState;
 
@@ -489,6 +517,82 @@ export default function AdminPortal({
               <span className="text-[10px] text-slate-400 font-bold uppercase block">Koreksi Essay</span>
               <strong className="text-xl text-slate-800 font-bold block mt-0.5">{pendingScoring} Tertunda</strong>
             </div>
+          </div>
+        </div>
+
+        {/* Dedicated Student Login Link Card */}
+        <div className="bg-white border border-emerald-200 rounded-2xl p-5 shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="p-2 bg-emerald-100 text-emerald-700 rounded-xl">
+                <Link2 className="h-4 w-4" />
+              </span>
+              <div>
+                <h3 className="font-bold text-sm text-slate-800">Link Login Khusus Siswa (Terpisah dari Proktor &amp; Guru)</h3>
+                <p className="text-[11px] text-slate-500">
+                  Link ini hanya menampilkan ruang login siswa tanpa tab Guru &amp; Proktor dan langsung terhubung ke Database Cloud yang sama.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2 shrink-0">
+            <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2">
+              <code className="text-xs font-mono font-bold text-emerald-900 select-all truncate max-w-[260px] sm:max-w-xs">
+                {primaryStudentUrl}
+              </code>
+              <button
+                type="button"
+                onClick={() => handleCopyStudentUrl('vercel', primaryStudentUrl)}
+                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 cursor-pointer transition-all shrink-0"
+              >
+                {copiedLinkType === 'vercel' ? (
+                  <>
+                    <Check className="h-3.5 w-3.5" /> Tersalin!
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-3.5 w-3.5" /> Salin Link Siswa
+                  </>
+                )}
+              </button>
+            </div>
+            {!isVercelHost && currentOriginStudentUrl !== aiStudioStudentUrl && (
+              <button
+                type="button"
+                onClick={() => handleCopyStudentUrl('aistudio', aiStudioStudentUrl)}
+                title="Salin link mode siswa untuk domain ai.studio"
+                className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-xl border border-slate-200 flex items-center justify-center gap-1.5 cursor-pointer transition-all shrink-0"
+              >
+                {copiedLinkType === 'aistudio' ? (
+                  <>
+                    <Check className="h-3.5 w-3.5 text-emerald-600" /> Link AI Studio Tersalin
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-3.5 w-3.5" /> Salin Link AI Studio
+                  </>
+                )}
+              </button>
+            )}
+            {currentOriginStudentUrl !== primaryStudentUrl && currentOriginStudentUrl !== aiStudioStudentUrl && (
+              <button
+                type="button"
+                onClick={() => handleCopyStudentUrl('current', currentOriginStudentUrl)}
+                title="Salin link mode siswa untuk alamat server Preview saat ini"
+                className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-xl border border-slate-200 flex items-center justify-center gap-1.5 cursor-pointer transition-all shrink-0"
+              >
+                {copiedLinkType === 'current' ? (
+                  <>
+                    <Check className="h-3.5 w-3.5 text-emerald-600" /> Link Preview Tersalin
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-3.5 w-3.5" /> Salin Link Preview
+                  </>
+                )}
+              </button>
+            )}
           </div>
         </div>
 

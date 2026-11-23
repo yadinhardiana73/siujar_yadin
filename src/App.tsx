@@ -21,9 +21,42 @@ import {
 import AdminPortal from './components/AdminPortal';
 import StudentExamPortal from './components/StudentExamPortal';
 
+const detectStudentOnlyMode = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  const params = new URLSearchParams(window.location.search);
+  const modeParam = (params.get('mode') || params.get('role') || params.get('portal') || '').trim().toLowerCase();
+  const path = window.location.pathname.replace(/\/+$/, '').toLowerCase();
+  const hash = window.location.hash.replace(/^#\/?/, '').toLowerCase();
+  return (
+    modeParam === 'siswa' ||
+    modeParam === 'student' ||
+    path === '/siswa' ||
+    path === '/student' ||
+    hash === 'siswa' ||
+    hash === 'student'
+  );
+};
+
 export default function App() {
+  const [isStudentOnlyMode, setIsStudentOnlyMode] = useState<boolean>(() => detectStudentOnlyMode());
   const [role, setRole] = useState<'gateway' | 'admin' | 'guru' | 'student'>('gateway');
   const [activeGatewayTab, setActiveGatewayTab] = useState<'siswa' | 'guru' | 'proktor'>('siswa');
+
+  useEffect(() => {
+    const syncMode = () => setIsStudentOnlyMode(detectStudentOnlyMode());
+    window.addEventListener('popstate', syncMode);
+    window.addEventListener('hashchange', syncMode);
+    return () => {
+      window.removeEventListener('popstate', syncMode);
+      window.removeEventListener('hashchange', syncMode);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isStudentOnlyMode) {
+      document.title = 'Portal Ujian Siswa - CBT Mandiri';
+    }
+  }, [isStudentOnlyMode]);
   
   // App state initialized from localStorage or seed
   const [appState, setAppState] = useState<CBTAppState>(() => {
@@ -595,8 +628,187 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-700 antialiased selection:bg-emerald-100">
       
-      {/* 1. PROFESSIONAL ROLE-BASED LOGIN GATEWAY */}
-      {role === 'gateway' && (
+      {/* 1A. DEDICATED STUDENT-ONLY PORTAL (?mode=siswa / /siswa / #siswa) */}
+      {role === 'gateway' && isStudentOnlyMode && (
+        <div className="min-h-screen bg-gradient-to-br from-emerald-50 via-white to-teal-50 flex flex-col justify-between p-4 sm:p-8 relative overflow-hidden font-sans">
+          {/* Subtle Daylight Academic Accents */}
+          <div className="absolute -top-24 -left-24 w-80 h-80 bg-emerald-200/30 rounded-full blur-3xl pointer-events-none"></div>
+          <div className="absolute -bottom-24 -right-24 w-80 h-80 bg-teal-200/30 rounded-full blur-3xl pointer-events-none"></div>
+
+          {/* Student Portal Header */}
+          <header className="flex flex-wrap justify-between items-center gap-3 relative z-10 w-full max-w-4xl mx-auto">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-emerald-600 text-white rounded-2xl shadow-md shadow-emerald-600/20">
+                <GraduationCap className="h-6 w-6" />
+              </div>
+              <div>
+                <h1 className="font-black text-slate-900 tracking-tight text-base leading-none">
+                  {appState.adminConfig?.schoolName || 'PORTAL UJIAN SISWA'}
+                </h1>
+                <p className="text-[11px] text-emerald-700 font-bold mt-1 uppercase tracking-wider">
+                  Ruang Login Khusus Peserta Ujian
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleManualRefreshCloud}
+                title="Segarkan data peserta & ujian dari Server"
+                className="px-3 py-1.5 bg-white hover:bg-emerald-50 text-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 border border-slate-200 shadow-xs cursor-pointer transition-all active:scale-95"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 text-emerald-600 ${isCloudLoading ? 'animate-spin' : ''}`} />
+                <span>Segarkan Data</span>
+              </button>
+              <span className="px-3 py-1.5 bg-emerald-100/80 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-bold flex items-center gap-1.5">
+                <span className={`h-2 w-2 rounded-full ${cloudSynced ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500 animate-ping'}`}></span>
+                <span>{cloudSynced ? `${appState.participants?.length || 0} Peserta Siap` : 'Menghubungkan Server...'}</span>
+              </span>
+            </div>
+          </header>
+
+          {/* Main Student Login Card (No Proktor / Guru Tabs) */}
+          <main className="max-w-md mx-auto w-full py-6 relative z-10 space-y-4">
+            <div className="bg-white border border-emerald-100 rounded-3xl p-6 sm:p-8 shadow-xl shadow-emerald-950/5 space-y-6">
+              <div className="space-y-1.5 text-left border-b border-slate-100 pb-4">
+                <div className="flex justify-between items-center gap-2">
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-bold">
+                    <GraduationCap className="h-3.5 w-3.5" /> Portal Peserta Ujian
+                  </span>
+                  <span className="text-[11px] px-2.5 py-0.5 rounded-lg font-bold bg-slate-100 text-slate-600 border border-slate-200">
+                    HP / Laptop
+                  </span>
+                </div>
+                <h2 className="text-xl font-black text-slate-900 pt-1">
+                  Masuk Ruang Ujian
+                </h2>
+                <p className="text-xs text-slate-500 leading-relaxed">
+                  Masukkan Username / NIS dan kata sandi yang tercetak pada Kartu Ujian Anda.
+                </p>
+              </div>
+
+              <form onSubmit={handleStudentLoginSubmit} className="space-y-4 text-left">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-700 uppercase tracking-wider block">
+                    Username / NIS / No. Peserta
+                  </label>
+                  <div className="relative">
+                    <User className="h-4 w-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      type="text"
+                      required
+                      placeholder="Masukkan username, NIS, atau no. peserta"
+                      value={studentUser}
+                      onChange={(e) => setStudentUser(e.target.value)}
+                      className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 text-sm font-medium focus:bg-white focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-hidden transition-all placeholder-slate-400"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-700 uppercase tracking-wider block">
+                    Sandi (Password Kartu Ujian)
+                  </label>
+                  <div className="relative">
+                    <Lock className="h-4 w-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      type={showStudentPass ? 'text' : 'password'}
+                      required
+                      placeholder="Masukkan sandi kartu ujian"
+                      value={studentPass}
+                      onChange={(e) => setStudentPass(e.target.value)}
+                      className="w-full pl-10 pr-11 py-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 text-sm font-medium focus:bg-white focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-hidden transition-all placeholder-slate-400"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowStudentPass(!showStudentPass)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-emerald-600 p-1 cursor-pointer transition-colors"
+                      title={showStudentPass ? 'Sembunyikan sandi' : 'Tampilkan sandi'}
+                    >
+                      {showStudentPass ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </button>
+                  </div>
+                </div>
+
+                {studentError && (
+                  <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 font-medium leading-relaxed flex items-start gap-2">
+                    <AlertTriangle className="h-4 w-4 shrink-0 text-red-500 mt-0.5" />
+                    <span>{studentError}</span>
+                  </div>
+                )}
+
+                {sessionTakeoverStudent && (
+                  <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-2xl space-y-2.5 animate-in fade-in">
+                    <div className="flex items-center gap-1.5 text-amber-800 font-bold text-xs">
+                      <ShieldCheck className="h-4 w-4 shrink-0 text-amber-600" />
+                      <span>Ambil Alih Sesi: {sessionTakeoverStudent.name}</span>
+                    </div>
+                    <p className="text-[11px] text-amber-700 leading-relaxed">
+                      Jika Anda berpindah perangkat ke HP / Laptop ini atau sesi sebelumnya belum keluar, klik tombol di bawah untuk melanjutkan ujian:
+                    </p>
+                    <div className="flex flex-col gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={handleTakeoverSession}
+                        className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <Laptop className="h-4 w-4" /> Lanjutkan Sesi di Perangkat Ini (HP / Laptop)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleRecheckResetStatus}
+                        className="w-full py-2 px-3 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs rounded-xl border border-slate-200 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <RefreshCw className={`h-3.5 w-3.5 text-emerald-600 ${isCloudLoading ? 'animate-spin' : ''}`} /> Cek Status Reset dari Server
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={isStudentLoggingIn}
+                  className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-sm rounded-xl shadow-lg shadow-emerald-600/20 transition-all cursor-pointer flex items-center justify-center gap-2 active:scale-98"
+                >
+                  {isStudentLoggingIn ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" /> Memverifikasi Kartu Ujian...
+                    </>
+                  ) : (
+                    <>
+                      <GraduationCap className="h-4 w-4" /> Masuk &amp; Lihat Jadwal Ujian
+                    </>
+                  )}
+                </button>
+              </form>
+            </div>
+
+            {/* Compact Student Exam Guide */}
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div className="bg-white/90 border border-emerald-100 rounded-2xl p-3 shadow-xs">
+                <span className="text-[10px] font-black text-emerald-700 uppercase block">1. Login</span>
+                <span className="text-[11px] text-slate-600 block mt-0.5">Sesuai Kartu Ujian</span>
+              </div>
+              <div className="bg-white/90 border border-emerald-100 rounded-2xl p-3 shadow-xs">
+                <span className="text-[10px] font-black text-emerald-700 uppercase block">2. Token</span>
+                <span className="text-[11px] text-slate-600 block mt-0.5">Minta ke Proktor</span>
+              </div>
+              <div className="bg-white/90 border border-emerald-100 rounded-2xl p-3 shadow-xs">
+                <span className="text-[10px] font-black text-emerald-700 uppercase block">3. Fokus</span>
+                <span className="text-[11px] text-slate-600 block mt-0.5">Jangan pindah tab</span>
+              </div>
+            </div>
+          </main>
+
+          <footer className="text-center relative z-10 text-slate-500 text-xs mt-4">
+            &copy; 2026 {appState.adminConfig?.schoolName || 'CBT Mandiri'} &bull; Portal Ujian Peserta
+          </footer>
+        </div>
+      )}
+
+      {/* 1B. PROFESSIONAL ROLE-BASED LOGIN GATEWAY (Proktor / Guru / Siswa) */}
+      {role === 'gateway' && !isStudentOnlyMode && (
         <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-emerald-950 flex flex-col justify-between p-4 sm:p-8 relative overflow-hidden font-sans">
           
           {/* Subtle Ambient Background Orbs */}
